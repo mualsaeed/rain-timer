@@ -1,141 +1,106 @@
-import keyboard
-import requests
-import time
+from flask import Flask, render_template, jsonify, request
 import threading
-import sys
+import time
 import os
 
-# Try to import notification, fallback if not available
-try:
-    from plyer import notification
-    HAS_NOTIFICATIONS = True
-except ImportError:
-    HAS_NOTIFICATIONS = False
-    print("Note: Install 'plyer' for system notifications: pip install plyer")
+app = Flask(__name__)
 
-class GlobalHotkeyClient:
-    def __init__(self, server_url="http://localhost:5000"):
-        self.server_url = server_url
-        self.is_running = True
-        self.last_trigger = 0  # Prevent spam clicking
+class SimpleTimer:
+    def __init__(self):
+        # Timer settings - 45 seconds until heavy rain
+        self.rain_duration = 45
+        self.safe_time = 7  # 7 seconds to find shelter
         
-    def send_trigger(self):
-        """Send trigger to web server"""
-        # Prevent spam (max once per second)
-        current_time = time.time()
-        if current_time - self.last_trigger < 1.0:
-            print("⚠ Too fast! Wait 1 second between triggers")
-            return
+        # State
+        self.countdown_active = False
+        self.remaining_time = 0
+        self.timer_thread = None
+        self.clients = []  # Simple client tracking
         
-        self.last_trigger = current_time
+    def trigger_rain_timer(self):
+        """Trigger the rain countdown"""
+        if self.countdown_active:
+            print("Timer already running, resetting...")
+            self.countdown_active = False
+            if self.timer_thread:
+                self.timer_thread.join(timeout=0.5)
         
-        try:
-            print("🚀 Sending trigger...")
-            response = requests.post(f"{self.server_url}/api/manual_trigger", timeout=3)
-            if response.status_code == 200:
-                print("✅ Timer started!")
-                
-                # Show system notification if available
-                if HAS_NOTIFICATIONS:
-                    notification.notify(
-                        title="Rain Alert ⚡",
-                        message="Timer started! Check your browser.",
-                        timeout=2
-                    )
-            else:
-                print(f"❌ Server error: {response.status_code}")
-                
-        except requests.exceptions.ConnectError:
-            print("❌ Cannot connect to server. Is it running?")
-            if HAS_NOTIFICATIONS:
-                notification.notify(
-                    title="Rain Alert Error",
-                    message="Cannot connect to server",
-                    timeout=2
-                )
-        except requests.exceptions.Timeout:
-            print("❌ Server timeout")
-        except Exception as e:
-            print(f"❌ Error: {e}")
+        print("Timer triggered! Starting countdown...")
+        self.countdown_active = True
+        self.remaining_time = self.rain_duration
+        
+        # Start timer thread
+        self.timer_thread = threading.Thread(target=self.timer_loop, daemon=True)
+        self.timer_thread.start()
+        return True
     
-    def setup_hotkeys(self):
-        """Setup global hotkeys"""
-        print("\n" + "="*50)
-        print("🌧️  RAIN ALERT - GLOBAL HOTKEY CLIENT")
-        print("="*50)
-        print(f"📡 Server: {self.server_url}")
-        print("\n⌨️  HOTKEYS:")
-        print("   Ctrl+P     → Trigger timer")  
-        print("   Ctrl+Alt+Q → Quit this app")
-        print("\n✅ Ready! Hotkeys work from anywhere.")
-        print("   Minimize this window and play your game!")
-        print("\n" + "-"*50)
+    def timer_loop(self):
+        """Timer countdown loop"""
+        while self.countdown_active and self.remaining_time > 0:
+            # Update every 0.1 seconds
+            time.sleep(0.1)
+            self.remaining_time -= 0.1
         
-        # Main trigger hotkey - Ctrl+P
-        keyboard.add_hotkey('ctrl+p', self.send_trigger, suppress=True)
+        # Timer finished
+        self.countdown_active = False
         
-        # Quit hotkey - Ctrl+Alt+Q  
-        keyboard.add_hotkey('ctrl+alt+q', self.quit_app, suppress=True)
-        
-    def test_connection(self):
-        """Test connection to server"""
-        try:
-            response = requests.get(f"{self.server_url}/api/status", timeout=3)
-            if response.status_code == 200:
-                print("✅ Connected to server!")
-                return True
-            else:
-                print(f"⚠ Server responded with status: {response.status_code}")
-                return False
-        except requests.exceptions.ConnectError:
-            print("❌ Cannot connect to server!")
-            print(f"   Make sure server is running at: {self.server_url}")
-            return False
-        except Exception as e:
-            print(f"❌ Connection error: {e}")
-            return False
+        # Reset after 3 seconds
+        time.sleep(3)
+        self.remaining_time = 0
     
-    def quit_app(self):
-        """Quit the application"""
-        print("\n👋 Shutting down global hotkey client...")
-        self.is_running = False
-        keyboard.unhook_all()
-        sys.exit(0)
+    def stop_timer(self):
+        """Stop the current timer"""
+        if self.countdown_active:
+            self.countdown_active = False
+            self.remaining_time = 0
+            return True
+        return False
     
-    def run(self):
-        """Run the hotkey client"""
-        try:
-            # Test connection first
-            if not self.test_connection():
-                print("\n💡 Tips:")
-                print("   1. Make sure your web server is running")
-                print("   2. Check the server URL is correct")
-                print("   3. Try opening the URL in your browser first")
-                input("\nPress Enter to continue anyway or Ctrl+C to quit...")
-            
-            self.setup_hotkeys()
-            
-            # Keep the script running
-            while self.is_running:
-                time.sleep(1)
-                
-        except KeyboardInterrupt:
-            self.quit_app()
+    def get_status(self):
+        """Get current timer status"""
+        if not self.countdown_active:
+            return {
+                'active': False,
+                'time': 45.0,
+                'safe': True,
+                'status': 'READY'
+            }
+        
+        is_safe = self.remaining_time > self.safe_time
+        return {
+            'active': True,
+            'time': round(self.remaining_time, 1),
+            'safe': is_safe,
+            'status': 'SAFE TIME' if is_safe else 'FIND SHELTER'
+        }
 
-if __name__ == "__main__":
-    print("Starting Global Hotkey Client...")
+# Global timer instance
+timer = SimpleTimer()
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/api/manual_trigger', methods=['POST'])
+def manual_trigger():
+    """Manually trigger rain timer"""
+    success = timer.trigger_rain_timer()
+    return jsonify({'success': success, 'message': 'Timer triggered'})
+
+@app.route('/api/stop_timer', methods=['POST'])
+def stop_timer():
+    """Stop the current timer"""
+    success = timer.stop_timer()
+    return jsonify({'success': success})
+
+@app.route('/api/status')
+def get_status():
+    """Get current timer status"""
+    return jsonify(timer.get_status())
+
+if __name__ == '__main__':
+    print("Starting Rain Alert Timer Server...")
+    print("Open http://localhost:5000 in your browser")
     
-    # Get server URL
-    default_url = "http://localhost:5000"
-    print(f"\nServer URL (press Enter for {default_url}):")
-    server_url = input("> ").strip()
-    
-    if not server_url:
-        server_url = default_url
-    
-    # Ensure URL has http://
-    if not server_url.startswith(('http://', 'https://')):
-        server_url = 'http://' + server_url
-    
-    client = GlobalHotkeyClient(server_url)
-    client.run()
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port, debug=False)
